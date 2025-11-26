@@ -57,6 +57,27 @@ bash scripts/ms_download_checkpoints.sh
 
 3. Download and process RealEstate10k dataset to  `data/real-estate-10k`
 
+The structure of RealEstate10K is exactly the same with DFoT.  Please download RealEstate10k from dataset of DFoT from here [huggingface dataset](https://huggingface.co/kiwhansong/DFoT/tree/main/datasets). The structure should like this [wiki from DFoT](https://github.com/kwsong0113/diffusion-forcing-transformer/wiki/Dataset) 
+
+```
+data/
+├── {dataset_name}/
+│   ├── training/
+│   │   ├── video_xxx.mp4
+│   │   ├── ...
+│   ├── validation/
+│   │   ├── video_xxx.mp4
+│   │   ├── ...
+│   ├── test/
+│   │   ├── video_xxx.mp4
+│   │   ├── ...
+│   ├── metadata/
+│   │   ├── training.pt
+│   │   ├── validation.pt
+│   │   ├── test.pt
+
+```
+
 ### Generating Videos with Pretrained Models
 
 1. Single Image to Long Video (256 Frames):
