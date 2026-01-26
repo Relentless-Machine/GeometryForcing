@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>Geometry Forcing: Marrying Video Diffusion and 3D Representation for Consistent World Modeling </h1>
+<h1>[ICLR26] Geometry Forcing: Marrying Video Diffusion and 3D Representation for Consistent World Modeling </h1>
 <a href="https://www.arxiv.org/abs/2507.07982">
 <img src='https://img.shields.io/badge/arxiv-geometryforcing-darkred' alt='Paper PDF'></a>
 <a href="https://geometryforcing.github.io/">
