@@ -5,7 +5,7 @@ from utils.huggingface_utils import download_from_hf
 
 
 def load_pretrained_i3d() -> torch.jit.ScriptModule:
-    model_path = download_from_hf("metrics_models/i3d_torchscript.pt")
+    model_path = download_from_hf("kiwhansong/DFoT", "metrics_models/i3d_torchscript.pt")
     # comes from https://github.com/JunyaoHu/common_metrics_on_video_quality/raw/main/fvd/styleganv/i3d_torchscript.pt
     detector = torch.jit.load(model_path)
     detector.eval()

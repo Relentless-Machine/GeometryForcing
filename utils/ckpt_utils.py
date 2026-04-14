@@ -116,8 +116,8 @@ def download_pretrained(
     (including optimizer states and non-EMA weights).
     """
     prefix, name = name.split(":")
-    download_from_hf(filename="config.json")
-    return download_from_hf(filename=f"{prefix}_models/{name}")
+    download_from_hf("kiwhansong/DFoT", "config.json")
+    return download_from_hf("kiwhansong/DFoT", f"{prefix}_models/{name}")
 
 
 def is_wandb_run_path(run_path: str) -> bool:

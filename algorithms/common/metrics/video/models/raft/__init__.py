@@ -18,7 +18,7 @@ class RAFT(nn.Module):
         )
 
         state_dict = torch.load(
-            download_from_hf("metrics_models/raft-things.pth"), map_location="cpu"
+            download_from_hf("kiwhansong/DFoT", "metrics_models/raft-things.pth"), map_location="cpu"
         )  # comes from https://dl.dropboxusercontent.com/s/4j4z58wuv8o0mfz/models.zip
         self.model.load_state_dict(
             {k.replace("module.", ""): v for k, v in state_dict.items()}

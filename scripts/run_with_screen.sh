@@ -58,7 +58,69 @@ if screen -list | grep -q "[.]${session_name}[[:space:]]"; then
   exit 1
 fi
 
-launch_cmd="cd '${ROOT_DIR}' && bash '${script_path}' 2>&1 | tee -a '${log_file}'"
+# hfd() { /root/GeometryForcing/hfd.sh "$@"; }
+# export HF_ENDPOINT=https://hf-mirror.com
+
+launch_cmd=$(cat <<EOF
+cd '${ROOT_DIR}'
+set -euo pipefail
+{
+  if command -v conda >/dev/null 2>&1; then
+    eval "\$(conda shell.bash hook)"
+  elif [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+    source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+  elif [[ -f "${HOME}/anaconda3/etc/profile.d/conda.sh" ]]; then
+    source "${HOME}/anaconda3/etc/profile.d/conda.sh"
+  elif [[ -f "/opt/conda/etc/profile.d/conda.sh" ]]; then
+    source "/opt/conda/etc/profile.d/conda.sh"
+  else
+    echo "Error: conda is not available in this shell."
+    exit 1
+  fi
+
+  conda activate geometryforcing
+
+  case '${script_base}' in
+    eval_geometry_forcing|eval_geometry_forcing_ratation|train_geometry_forcing)
+      echo "Prewarming local caches..."
+      export HF_ENDPOINT=https://hf-mirror.com
+      hfd_dfot_dir="./huggingface/kiwhansong--DFoT"
+      hfd_vggt_dir="./huggingface/facebook--VGGT-1B"
+      hfd_threads="\${HFD_X:-8}"
+      hfd_jobs="\${HFD_J:-4}"
+      hfd_auth_args=()
+      if [[ -n "\${HFD_HF_USERNAME:-}" && -n "\${HFD_HF_TOKEN:-}" ]]; then
+        hfd_auth_args=(--hf_username "\${HFD_HF_USERNAME}" --hf_token "\${HFD_HF_TOKEN}")
+      fi
+      if command -v hfd >/dev/null 2>&1; then
+        mkdir -p "\${hfd_dfot_dir}" "\${hfd_vggt_dir}"
+        hfd kiwhansong/DFoT --include metrics_models/i3d_torchscript.pt metrics_models/raft-things.pth --local-dir "\${hfd_dfot_dir}" -x "\${hfd_threads}" -j "\${hfd_jobs}" "\${hfd_auth_args[@]}" || true
+        hfd facebook/VGGT-1B --local-dir "\${hfd_vggt_dir}" -x "\${hfd_threads}" -j "\${hfd_jobs}" "\${hfd_auth_args[@]}" || true
+      else
+        echo "hfd is not installed; downloading hfd.sh from hf-mirror."
+        wget -O ./hfd.sh https://hf-mirror.com/hfd/hfd.sh
+        chmod a+x ./hfd.sh
+        mkdir -p "\${hfd_dfot_dir}" "\${hfd_vggt_dir}"
+        ./hfd.sh kiwhansong/DFoT --include metrics_models/i3d_torchscript.pt metrics_models/raft-things.pth --local-dir "\${hfd_dfot_dir}" -x "\${hfd_threads}" -j "\${hfd_jobs}" "\${hfd_auth_args[@]}" || true
+        ./hfd.sh facebook/VGGT-1B --local-dir "\${hfd_vggt_dir}" -x "\${hfd_threads}" -j "\${hfd_jobs}" "\${hfd_auth_args[@]}" || true
+      fi
+
+      if [[ ! -f "\${hfd_dfot_dir}/metrics_models/i3d_torchscript.pt" ]]; then
+        echo "Warning: missing prewarmed i3d_torchscript.pt, runtime may access network."
+      fi
+      if [[ ! -f "\${hfd_dfot_dir}/metrics_models/raft-things.pth" ]]; then
+        echo "Warning: missing prewarmed raft-things.pth, runtime may access network."
+      fi
+      if [[ ! -f "\${hfd_vggt_dir}/model.safetensors" ]]; then
+        echo "Warning: missing prewarmed VGGT model.safetensors, runtime may access network."
+      fi
+      ;;
+  esac
+
+  bash '${script_path}'
+} 2>&1 | tee -a '${log_file}'
+EOF
+)
 screen -dmS "${session_name}" bash -lc "${launch_cmd}"
 
 echo "Started."

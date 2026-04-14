@@ -8,6 +8,7 @@ from external.vggt import VGGT
 from einops import rearrange
 from torch import Tensor
 from external.alignment_projector import ConvProjector
+from utils.huggingface_utils import local_hfd_repo_dir
 
 def mean_flat(x):
     """
@@ -30,7 +31,8 @@ class VGGTAlignmentLoss(nn.Module):
         self.alignment_context_length = alignment_context_length
         self.unormalize_lambda = unormalize_lambda 
         # === 1. 初始化冻结的 VGGT 模型 ===
-        self.vggt_model = VGGT.from_pretrained("facebook/VGGT-1B")
+        vggt_repo_dir = local_hfd_repo_dir("facebook/VGGT-1B")
+        self.vggt_model = VGGT.from_pretrained(vggt_repo_dir or "facebook/VGGT-1B")
         self.vggt_model.eval()
         for p in self.vggt_model.parameters():
             p.requires_grad = False
