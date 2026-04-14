@@ -173,3 +173,9 @@ data
 
 # huggingface
 huggingface/
+
+# personal logs
+logs/
+logs
+docs/
+docs
