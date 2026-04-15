@@ -37,6 +37,9 @@ class VGGTAlignmentLoss(nn.Module):
         self.joint_finetune_vggt = joint_finetune_vggt
         self.ema_momentum = ema_momentum
         self.vggt_distill_coeff = vggt_distill_coeff
+        self.last_generation_alignment_loss = None
+        self.last_student_ema_loss = None
+        self.last_total_alignment_loss = None
 
         # === 1. 初始化 VGGT 学生模型与 EMA 教师模型 ===
         vggt_repo_dir = local_hfd_repo_dir("facebook/VGGT-1B")
@@ -264,6 +267,8 @@ class VGGTAlignmentLoss(nn.Module):
                 unormalize_loss += F.mse_loss(unormalized_latent_proj, target_feat)
                 
         alignment_loss /= len(latents)
+        self.last_generation_alignment_loss = alignment_loss.detach()
+        self.last_student_ema_loss = None
         if student_feats is not None:
             student_feat = rearrange(student_feats, 'b t c h w -> (b t) c h w')
             teacher_feat = rearrange(target_feats, 'b t c h w -> (b t) c h w')
@@ -272,6 +277,7 @@ class VGGTAlignmentLoss(nn.Module):
             student_feat_norm = F.normalize(student_feat_flat, p=2, dim=-1)
             teacher_feat_norm = F.normalize(teacher_feat_flat, p=2, dim=-1)
             student_ema_loss = mean_flat(-(student_feat_norm * teacher_feat_norm)).sum(dim=-1)
+            self.last_student_ema_loss = student_ema_loss.detach()
             alignment_loss = alignment_loss + self.vggt_distill_coeff * student_ema_loss
 
         if self.apply_unnormalize_recon:
@@ -281,4 +287,5 @@ class VGGTAlignmentLoss(nn.Module):
             loss = alignment_loss + unormalize_loss
         else:
             loss = alignment_loss
+        self.last_total_alignment_loss = loss.detach()
         return loss

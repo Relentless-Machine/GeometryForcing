@@ -32,6 +32,9 @@ python -m main +name=RE10k dataset=realestate10k \
         experiment=video_generation @diffusion/continuous \
         algorithm.alignment.latents_info=2 \
         algorithm.alignment.alignment_coeff=0.1 \
+        algorithm.alignment.joint_finetune_vggt=true \
+        algorithm.alignment.ema_momentum=0.995 \
+        algorithm.alignment.vggt_distill_coeff=1.0 \
         load=$init_ckpt_path \
         dataset.subdataset_size=10000 \
         experiment.training.lr=8e-6 \

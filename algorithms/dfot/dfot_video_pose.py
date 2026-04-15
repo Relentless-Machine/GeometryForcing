@@ -215,6 +215,22 @@ class DFoTGeometryForcing(DFoTVideoPose):
                     sync_dist=True,
                     prog_bar=True, 
                 )
+                if hasattr(self.vggt_alignment_loss, "last_generation_alignment_loss") and self.vggt_alignment_loss.last_generation_alignment_loss is not None:
+                    self.log(
+                        f"{namespace}/alignment_generation_loss",
+                        self.vggt_alignment_loss.last_generation_alignment_loss.mean(),
+                        on_step=namespace == "training",
+                        on_epoch=namespace != "training",
+                        sync_dist=True,
+                    )
+                if hasattr(self.vggt_alignment_loss, "last_student_ema_loss") and self.vggt_alignment_loss.last_student_ema_loss is not None:
+                    self.log(
+                        f"{namespace}/alignment_student_ema_loss",
+                        self.vggt_alignment_loss.last_student_ema_loss.mean(),
+                        on_step=namespace == "training",
+                        on_epoch=namespace != "training",
+                        sync_dist=True,
+                    )
 
         xs, xs_pred = map(self._unnormalize_x, (xs, xs_pred))
         output_dict = {
