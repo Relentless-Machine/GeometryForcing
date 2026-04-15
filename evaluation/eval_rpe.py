@@ -8,12 +8,17 @@ import json
 import os
 import re
 import tempfile
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import imageio.v3 as iio
 import numpy as np
 import torch
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from evaluation.reprojection_error import ReprojectionErrorMetric
 

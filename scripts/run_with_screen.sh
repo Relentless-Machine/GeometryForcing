@@ -78,9 +78,13 @@ set -euo pipefail
     exit 1
   fi
 
-  conda activate geometryforcing
+  conda_env="geometryforcing"
+  if [[ "${script_base}" == "eval_rpe" ]]; then
+    conda_env="rpe_evaluation"
+  fi
+  conda activate "\${conda_env}"
 
-  case '${script_base}' in
+  case "${script_base}" in
     eval_geometry_forcing|eval_geometry_forcing_ratation|train_geometry_forcing)
       echo "Prewarming local caches..."
       export HF_ENDPOINT=https://hf-mirror.com

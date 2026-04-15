@@ -70,10 +70,25 @@ class ReprojectionErrorMetric():
 
     def __init__(self) -> None:
         super().__init__()
+        repo_dir = os.path.dirname(__file__)
+        default_weights = os.path.join(repo_dir, 'checkpoints', 'droid.pth')
+        fallback_weights = os.path.join(repo_dir, 'third_party', 'DROID-SLAM', 'droid.pth')
+        if os.path.isfile(default_weights):
+            weights_path = default_weights
+        elif os.path.isfile(fallback_weights):
+            weights_path = fallback_weights
+        else:
+            raise FileNotFoundError(
+                "Missing DROID-SLAM checkpoint 'droid.pth'. "
+                f"Expected one of: {default_weights}, {fallback_weights}. "
+                "Download it via 'cd evaluation/reprojection_error/third_party/DROID-SLAM && ./tools/download_model.sh' "
+                "then copy/symlink to evaluation/reprojection_error/checkpoints/droid.pth."
+            )
+
         args = {
             "t0": 0,
             "stride": 1,
-            "weights": os.path.join(os.path.dirname(__file__), 'checkpoints', 'droid.pth'),
+            "weights": weights_path,
             "buffer": 512,
             "beta": 0.3,
             "filter_thresh": 0.01,
@@ -94,12 +109,11 @@ class ReprojectionErrorMetric():
 
         self._args = args
         self.droid = None
-        try:
+        if torch.multiprocessing.get_start_method(allow_none=True) is None:
             torch.multiprocessing.set_start_method('spawn')
-        except Exception as e:
-            print(f"Error setting start method: {e}")
 
     def compute_scores(self, rendered_images: List[str], reconstruction_path: str = None) -> float:
+        mean_error = float('nan')
         for (t, image, intrinsics) in tqdm(image_stream(rendered_images, self._args.stride, getattr(self._args, 'calib', None))):
             if t < self._args.t0:
                 continue

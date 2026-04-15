@@ -21,7 +21,7 @@ for i in "${!all_setting_names[@]}"; do
     output_dir=${log_dir}/"eval"
     
 
-    python eval_revisiting.py \
+    python eval_rve.py \
         --temp_dir ${temp_dir} \
         --output_dir ${output_dir} \
         --gif_dir ${gif_dir} \
