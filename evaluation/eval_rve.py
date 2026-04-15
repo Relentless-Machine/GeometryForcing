@@ -20,8 +20,8 @@ from revisit_error import img_psnr, calculate_ssim_function, img_lpips_loss_fn
 from torch_fidelity import calculate_metrics
 from torchvision.utils import save_image
 
-def split_gif_to_videos(gif_path: str) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Split a side-by-side GIF into generated and ground truth video tensors."""
+def split_gif_to_videos(gif_path: str) -> torch.Tensor:
+    """Extract generated video frames from a side-by-side GIF as [T, C, H, W]."""
     gif_frames = iio.imread(gif_path)
     
     # Ensure proper format
@@ -64,12 +64,66 @@ def save_video_frames(video_tensor: torch.Tensor, output_dir: str) -> List[str]:
     return frame_paths
 
 
-def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
+def _find_best_matching_previous_frame(
+    gen_video: torch.Tensor,
+    match_window: Optional[int] = None,
+    match_start_idx: Optional[int] = None,
+    match_end_idx: Optional[int] = None,
+) -> Tuple[int, float]:
+    """Find the previous frame that best matches the last frame using MSE similarity."""
+    if gen_video.shape[0] < 2:
+        return -1, float("nan")
+
+    last_frame = gen_video[-1:]  # [1, C, H, W]
+    num_prev_frames = gen_video.shape[0] - 1
+    max_candidate_idx = num_prev_frames - 1
+
+    # Default candidate range is all previous frames [0, T-2].
+    start_idx = 0
+    end_idx = max_candidate_idx
+
+    # If explicit range is not provided, use window-based range.
+    if match_start_idx is None and match_end_idx is None:
+        if match_window is not None and match_window < num_prev_frames:
+            start_idx = num_prev_frames - match_window
+    else:
+        if match_start_idx is not None:
+            start_idx = max(0, match_start_idx)
+        if match_end_idx is not None:
+            end_idx = min(max_candidate_idx, match_end_idx)
+
+    if start_idx > end_idx:
+        raise ValueError(
+            f"Invalid matching range: [{start_idx}, {end_idx}]. "
+            f"Valid candidate indices are [0, {max_candidate_idx}]"
+        )
+
+    prev_frames = gen_video[start_idx:end_idx + 1]  # [K, C, H, W]
+
+    # MSE over channel/height/width for each candidate frame.
+    mse_per_frame = ((prev_frames - last_frame) ** 2).mean(dim=(1, 2, 3))
+    local_best_idx = int(torch.argmin(mse_per_frame).item())
+    best_idx = start_idx + local_best_idx
+    best_mse = float(mse_per_frame[local_best_idx].item())
+    return best_idx, best_mse
+
+
+def calculate_revisiting_error(
+    gen_video: torch.Tensor,
+    match_window: Optional[int] = None,
+    match_start_idx: Optional[int] = None,
+    match_end_idx: Optional[int] = None,
+) -> Dict[str, float]:
     """
-    Calculate revisiting error metrics by comparing first and last frames.
+    Calculate revisiting error metrics by comparing the last frame against
+    the most similar previous frame.
     
     Args:
         gen_video: torch.Tensor of shape [T, C, H, W] with values in [0, 1]
+        match_window: Number of frames before the last frame to search for
+            best match. None means use all previous frames.
+        match_start_idx: Inclusive start index for matching candidates.
+        match_end_idx: Inclusive end index for matching candidates.
         
     Returns:
         Dictionary containing revisiting error metrics
@@ -80,22 +134,34 @@ def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
     if gen_video.shape[0] < 2:
         print(f"Warning: Video has less than 2 frames ({gen_video.shape[0]}), cannot calculate revisiting error")
         return {
+            'revisiting_match_frame_idx': -1,
+            'revisiting_match_mse': float('nan'),
             'revisiting_psnr': float('nan'),
             'revisiting_ssim': float('nan'), 
             'revisiting_lpips': float('nan'),
             'revisiting_fid': float('nan')
         }
     
-    # Get first and last frames
-    first_frame = gen_video[0:1]  # [1, C, H, W]
-    last_frame = gen_video[-1:]   # [1, C, H, W]
+    # Compare the last frame with the most similar previous frame.
+    # This is robust when the camera rotates more than 360 degrees.
+    matched_idx, matched_mse = _find_best_matching_previous_frame(
+        gen_video,
+        match_window=match_window,
+        match_start_idx=match_start_idx,
+        match_end_idx=match_end_idx,
+    )
+    matched_frame = gen_video[matched_idx:matched_idx + 1]  # [1, C, H, W]
+    last_frame = gen_video[-1:]                              # [1, C, H, W]
     
-    metrics = {}
+    metrics = {
+        'revisiting_match_frame_idx': matched_idx,
+        'revisiting_match_mse': matched_mse,
+    }
     
     try:
         # Calculate PSNR
         if img_psnr is not None:
-            first_np = first_frame[0].cpu().numpy().transpose(1, 2, 0)  # [H, W, C]
+            first_np = matched_frame[0].cpu().numpy().transpose(1, 2, 0)  # [H, W, C]
             last_np = last_frame[0].cpu().numpy().transpose(1, 2, 0)    # [H, W, C]
             psnr_val = img_psnr(first_np, last_np)
             metrics['revisiting_psnr'] = float(psnr_val)
@@ -104,7 +170,7 @@ def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
         
         # Calculate SSIM
         if calculate_ssim_function is not None:
-            first_ssim = first_frame[0].cpu().numpy()  # [C, H, W]
+            first_ssim = matched_frame[0].cpu().numpy()  # [C, H, W]
             last_ssim = last_frame[0].cpu().numpy()    # [C, H, W]
             ssim_val = calculate_ssim_function(first_ssim, last_ssim)
             metrics['revisiting_ssim'] = float(ssim_val)
@@ -118,7 +184,7 @@ def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
             img_lpips_loss_fn.eval()
             
             # Normalize to [-1, 1] for LPIPS
-            first_lpips = (first_frame * 2 - 1).to(device)
+            first_lpips = (matched_frame * 2 - 1).to(device)
             last_lpips = (last_frame * 2 - 1).to(device)
             
             with torch.no_grad():
@@ -138,7 +204,7 @@ def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
                     
                     # For FID with single images, we need multiple copies
                     for i in range(50):  # Create multiple copies for stable FID calculation
-                        save_image(first_frame[0], os.path.join(first_dir, f"frame_{i:03d}.png"))
+                        save_image(matched_frame[0], os.path.join(first_dir, f"frame_{i:03d}.png"))
                         save_image(last_frame[0], os.path.join(last_dir, f"frame_{i:03d}.png"))
                     
                     fid_metrics = calculate_metrics(
@@ -159,6 +225,8 @@ def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
     except Exception as e:
         print(f"Error calculating revisiting metrics: {e}")
         metrics.update({
+            'revisiting_match_frame_idx': -1,
+            'revisiting_match_mse': float('nan'),
             'revisiting_psnr': float('nan'),
             'revisiting_ssim': float('nan'),
             'revisiting_lpips': float('nan'),
@@ -168,7 +236,14 @@ def calculate_revisisting_error(gen_video: torch.Tensor) -> Dict[str, float]:
     return metrics
     
 
-def process_single_gif(gif_path: str, output_dir: str, temp_dir: Optional[str]) -> Dict[str, Any]:
+def process_single_gif(
+    gif_path: str,
+    output_dir: str,
+    temp_dir: Optional[str],
+    match_window: Optional[int],
+    match_start_idx: Optional[int],
+    match_end_idx: Optional[int],
+) -> Dict[str, Any]:
     """Process a single GIF file and calculate metrics."""
     gif_name = Path(gif_path).stem
     print(f"Processing {gif_name}...")
@@ -183,11 +258,18 @@ def process_single_gif(gif_path: str, output_dir: str, temp_dir: Optional[str]) 
         save_tensor_as_video(gen_video, gen_video_path)
     
     # Calculate metrics
-    metrics = calculate_revisisting_error(gen_video)
+    metrics = calculate_revisiting_error(
+        gen_video,
+        match_window=match_window,
+        match_start_idx=match_start_idx,
+        match_end_idx=match_end_idx,
+    )
     
     # Print metrics
     for key, value in metrics.items():
-        if isinstance(value, float) and not np.isnan(value):
+        if isinstance(value, (int, np.integer)):
+            print(f"  {key}: {int(value)}")
+        elif isinstance(value, float) and not np.isnan(value):
             print(f"  {key}: {value:.4f}")
         else:
             print(f"  {key}: N/A")
@@ -213,6 +295,9 @@ def calculate_aggregate_metrics(results: List[Dict[str, Any]]) -> Dict[str, floa
     aggregated = {}
     
     for key in metric_keys:
+        if key == 'revisiting_match_frame_idx':
+            # Frame index is metadata, not a continuous metric to summarize.
+            continue
         values = [r['metrics'][key] for r in valid_results if key in r['metrics'] and not np.isnan(r['metrics'][key])]
         if values:
             aggregated.update({
@@ -301,8 +386,25 @@ def main():
                        help='Maximum number of GIF files to process')
     parser.add_argument('--pattern', type=str, default='*.gif',
                        help='File pattern to match GIF files')
+    parser.add_argument('--match_window', type=int, default=None,
+                       help='Matching range size before the last frame. Default: all previous frames')
+    parser.add_argument('--match_start_idx', type=int, default=None,
+                       help='Inclusive start frame index for matching candidates (0-based)')
+    parser.add_argument('--match_end_idx', type=int, default=None,
+                       help='Inclusive end frame index for matching candidates (0-based)')
     
     args = parser.parse_args()
+
+    if args.match_window is not None and args.match_window < 1:
+        parser.error('--match_window must be a positive integer')
+    if args.match_start_idx is not None and args.match_start_idx < 0:
+        parser.error('--match_start_idx must be >= 0')
+    if args.match_end_idx is not None and args.match_end_idx < 0:
+        parser.error('--match_end_idx must be >= 0')
+    if args.match_start_idx is not None and args.match_end_idx is not None and args.match_start_idx > args.match_end_idx:
+        parser.error('--match_start_idx must be <= --match_end_idx')
+    if args.match_window is not None and (args.match_start_idx is not None or args.match_end_idx is not None):
+        parser.error('--match_window cannot be used together with --match_start_idx/--match_end_idx')
     
     # Create output directories
     os.makedirs(args.output_dir, exist_ok=True)
@@ -322,7 +424,14 @@ def main():
     # Process files
     results = []
     for gif_path in gif_files:
-        result = process_single_gif(str(gif_path), args.output_dir, args.temp_dir)
+        result = process_single_gif(
+            str(gif_path),
+            args.output_dir,
+            args.temp_dir,
+            args.match_window,
+            args.match_start_idx,
+            args.match_end_idx,
+        )
         results.append(result)
     
     # Calculate aggregate metrics

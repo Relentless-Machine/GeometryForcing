@@ -25,5 +25,7 @@ for i in "${!all_setting_names[@]}"; do
         --temp_dir ${temp_dir} \
         --output_dir ${output_dir} \
         --gif_dir ${gif_dir} \
+        --match_start_idx 2 \
+        --match_end_idx 5 \
         > ${log_dir}/log.txt 2>&1
 done
