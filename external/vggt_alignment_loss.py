@@ -1,6 +1,7 @@
 import sys
 sys.path.append('../')
 import os 
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,6 +23,9 @@ class VGGTAlignmentLoss(nn.Module):
                  alignment_context_length: int = 16,
                  apply_unnormalize_recon: bool = False,
                  unormalize_lambda: float =  1, # lambda for unormalize recon loss
+                 joint_finetune_vggt: bool = False,
+                 ema_momentum: float = 0.996,
+                 vggt_distill_coeff: float = 1.0,
                  latents_info: list = None, # the shape of generative model latents
                  encoder_info: list = [24, 1374, 2048], # the shape of encoder output
                  mid_channels: int = 128,
@@ -30,12 +34,26 @@ class VGGTAlignmentLoss(nn.Module):
         super().__init__()
         self.alignment_context_length = alignment_context_length
         self.unormalize_lambda = unormalize_lambda 
-        # === 1. 初始化冻结的 VGGT 模型 ===
+        self.joint_finetune_vggt = joint_finetune_vggt
+        self.ema_momentum = ema_momentum
+        self.vggt_distill_coeff = vggt_distill_coeff
+
+        # === 1. 初始化 VGGT 学生模型与 EMA 教师模型 ===
         vggt_repo_dir = local_hfd_repo_dir("facebook/VGGT-1B")
         self.vggt_model = VGGT.from_pretrained(vggt_repo_dir or "facebook/VGGT-1B")
-        self.vggt_model.eval()
-        for p in self.vggt_model.parameters():
-            p.requires_grad = False
+        if self.joint_finetune_vggt:
+            self.vggt_model.train()
+            for p in self.vggt_model.parameters():
+                p.requires_grad = True
+            self.vggt_teacher_ema = copy.deepcopy(self.vggt_model)
+            self.vggt_teacher_ema.eval()
+            for p in self.vggt_teacher_ema.parameters():
+                p.requires_grad = False
+        else:
+            self.vggt_model.eval()
+            for p in self.vggt_model.parameters():
+                p.requires_grad = False
+            self.vggt_teacher_ema = None
         # import pdb; pdb.set_trace()
         # === 2. 构建连接器 ===
         # for realestate 10k uvit setting: totally 7 blocks 
@@ -90,10 +108,38 @@ class VGGTAlignmentLoss(nn.Module):
         missing, unexpected = self.load_state_dict(new_state_dict,strict=False)
         # filter missing and unexpected keys 
         # 1. vggt is loaded from pretrained model
-        missing = [k for k in missing if not k.startswith("vggt_model.")]
+        missing = [
+            k
+            for k in missing
+            if not (k.startswith("vggt_model.") or k.startswith("vggt_teacher_ema."))
+        ]
         # 2. model is saved in ckpt but not in here 
         unexpected = [k for k in unexpected if not k.startswith("diffusion_model.")]
         print(f"Load projector from {ckpt_path} successfully. with  missing keys: {missing}, unexpected keys: {unexpected}")
+
+    @torch.no_grad()
+    def update_ema(self):
+        if not self.joint_finetune_vggt or self.vggt_teacher_ema is None:
+            return
+        momentum = self.ema_momentum
+        for teacher_param, student_param in zip(
+            self.vggt_teacher_ema.parameters(), self.vggt_model.parameters()
+        ):
+            teacher_param.data.mul_(momentum).add_(student_param.data, alpha=1.0 - momentum)
+        for teacher_buffer, student_buffer in zip(
+            self.vggt_teacher_ema.buffers(), self.vggt_model.buffers()
+        ):
+            teacher_buffer.data.copy_(student_buffer.data)
+
+    def _extract_vggt_features(self, images: Tensor, model: nn.Module):
+        aggregated_tokens_list, patch_start_idx = model.shortcut_forward(images)
+        target_h,target_w =  self.encoder_info[1], self.encoder_info[2]
+        aggregated_tokens_list = [
+            F.interpolate(tokens, size=(target_h, target_w), mode='bilinear', align_corners=False)
+            for tokens in aggregated_tokens_list
+        ]
+        aggregated_tokens = torch.stack(aggregated_tokens_list)
+        return rearrange(aggregated_tokens,'c b t h w -> b t c h w')
         
     def latent_to_aggregated_token(self,latent, layer_index=-1):
         """
@@ -177,14 +223,14 @@ class VGGTAlignmentLoss(nn.Module):
         """
         images = images[:, :self.alignment_context_length, :, :, :]  # [B, T, C, H, W]
         images = self.vggt_processor(images) # [B, 3, T, H, W]
-        with torch.no_grad():
-            # target_feats = self.vggt_model.encode(images)  # list[Tensor], shape [B,T,1374, 2048]
-            aggregated_tokens_list, patch_start_idx = self.vggt_model.shortcut_forward(images) #  24x []
-            # interpolate to few dimension 
-            target_h,target_w =  self.encoder_info[1], self.encoder_info[2]  # 1374, 2048
-            aggregated_tokens_list = [F.interpolate(tokens, size=(target_h, target_w), mode='bilinear', align_corners=False) for tokens in aggregated_tokens_list]
-            aggregated_tokens = torch.stack(aggregated_tokens_list)  # [B*T, 512, 512]
-            target_feats = rearrange(aggregated_tokens,'c b t h w -> b t c h w')
+        if self.joint_finetune_vggt and self.vggt_teacher_ema is not None:
+            with torch.no_grad():
+                target_feats = self._extract_vggt_features(images, self.vggt_teacher_ema)
+            student_feats = self._extract_vggt_features(images, self.vggt_model)
+        else:
+            with torch.no_grad():
+                target_feats = self._extract_vggt_features(images, self.vggt_model)
+            student_feats = None
             
         alignment_loss = 0.
         unormalize_loss = 0. 
@@ -218,6 +264,16 @@ class VGGTAlignmentLoss(nn.Module):
                 unormalize_loss += F.mse_loss(unormalized_latent_proj, target_feat)
                 
         alignment_loss /= len(latents)
+        if student_feats is not None:
+            student_feat = rearrange(student_feats, 'b t c h w -> (b t) c h w')
+            teacher_feat = rearrange(target_feats, 'b t c h w -> (b t) c h w')
+            student_feat_flat = rearrange(student_feat, 'b c h w -> b c (h w)')
+            teacher_feat_flat = rearrange(teacher_feat, 'b c h w -> b c (h w)')
+            student_feat_norm = F.normalize(student_feat_flat, p=2, dim=-1)
+            teacher_feat_norm = F.normalize(teacher_feat_flat, p=2, dim=-1)
+            student_ema_loss = mean_flat(-(student_feat_norm * teacher_feat_norm)).sum(dim=-1)
+            alignment_loss = alignment_loss + self.vggt_distill_coeff * student_ema_loss
+
         if self.apply_unnormalize_recon:
             unormalize_loss /= len(latents)
             unormalize_lambda = self.unormalize_lambda

@@ -223,3 +223,41 @@ class DFoTGeometryForcing(DFoTVideoPose):
             "xs": xs,
         }
         return output_dict
+
+    def configure_optimizers(self):
+        transition_params = list(self.diffusion_model.parameters())
+        if self.alignment_coeff > 0 and hasattr(self, "vggt_alignment_loss"):
+            alignment_params = [
+                p for p in self.vggt_alignment_loss.parameters() if p.requires_grad
+            ]
+            transition_params = transition_params + alignment_params
+
+        optimizer_dynamics = torch.optim.AdamW(
+            transition_params,
+            lr=self.cfg.lr,
+            weight_decay=self.cfg.weight_decay,
+            betas=self.cfg.optimizer_beta,
+        )
+
+        lr_scheduler_config = {
+            "scheduler": get_scheduler(
+                optimizer=optimizer_dynamics,
+                **self.cfg.lr_scheduler,
+            ),
+            "interval": "step",
+            "frequency": 1,
+        }
+
+        return {
+            "optimizer": optimizer_dynamics,
+            "lr_scheduler": lr_scheduler_config,
+        }
+
+    def optimizer_step(self, *args, **kwargs):
+        super().optimizer_step(*args, **kwargs)
+        if (
+            self.alignment_coeff > 0
+            and hasattr(self, "vggt_alignment_loss")
+            and hasattr(self.vggt_alignment_loss, "update_ema")
+        ):
+            self.vggt_alignment_loss.update_ema()
