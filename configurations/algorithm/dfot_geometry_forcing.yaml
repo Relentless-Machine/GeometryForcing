@@ -18,6 +18,9 @@ alignment:
   joint_finetune_vggt: true
   ema_momentum: 0.996
   vggt_distill_coeff: 1.0
+  enable_vggt_checkpoint: false
+  vggt_checkpoint_mode: shortcut # shortcut | block
+  vggt_checkpoint_use_reentrant: false
   apply_unnormalize_recon: True 
   alignment_context_length: 16 # number of frames to use for repa loss
   # vggt_layer_index: -1 

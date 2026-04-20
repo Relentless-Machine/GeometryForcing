@@ -8,6 +8,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as cp
 from typing import Optional, Tuple, Union, List, Dict, Any
 
 from external.vggt.layers import PatchEmbed
@@ -113,6 +114,8 @@ class Aggregator(nn.Module):
         self.aa_order = aa_order
         self.patch_size = patch_size
         self.aa_block_size = aa_block_size
+        self.use_activation_checkpoint = False
+        self.checkpoint_use_reentrant = False
 
         # Validate that depth is divisible by aa_block_size
         if self.depth % self.aa_block_size != 0:
@@ -278,7 +281,29 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+            block = self.frame_blocks[frame_idx]
+            if self.use_activation_checkpoint and self.training and torch.is_grad_enabled():
+                if pos is None:
+                    def _forward_no_pos(_tokens):
+                        return block(_tokens, pos=None)
+
+                    tokens = cp.checkpoint(
+                        _forward_no_pos,
+                        tokens,
+                        use_reentrant=self.checkpoint_use_reentrant,
+                    )
+                else:
+                    def _forward_with_pos(_tokens, _pos):
+                        return block(_tokens, pos=_pos)
+
+                    tokens = cp.checkpoint(
+                        _forward_with_pos,
+                        tokens,
+                        pos,
+                        use_reentrant=self.checkpoint_use_reentrant,
+                    )
+            else:
+                tokens = block(tokens, pos=pos)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -298,7 +323,29 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            tokens = self.global_blocks[global_idx](tokens, pos=pos)
+            block = self.global_blocks[global_idx]
+            if self.use_activation_checkpoint and self.training and torch.is_grad_enabled():
+                if pos is None:
+                    def _forward_no_pos(_tokens):
+                        return block(_tokens, pos=None)
+
+                    tokens = cp.checkpoint(
+                        _forward_no_pos,
+                        tokens,
+                        use_reentrant=self.checkpoint_use_reentrant,
+                    )
+                else:
+                    def _forward_with_pos(_tokens, _pos):
+                        return block(_tokens, pos=_pos)
+
+                    tokens = cp.checkpoint(
+                        _forward_with_pos,
+                        tokens,
+                        pos,
+                        use_reentrant=self.checkpoint_use_reentrant,
+                    )
+            else:
+                tokens = block(tokens, pos=pos)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 

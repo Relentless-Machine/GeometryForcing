@@ -12,6 +12,7 @@ import os
 import sys
 import subprocess
 import time
+import json
 from pathlib import Path
 
 import hydra
@@ -36,7 +37,34 @@ from utils.distributed_utils import rank_zero_print, is_rank_zero
 from utils.hydra_utils import unwrap_shortcuts
 
 
+def _patch_wandb_flags_none_bug():
+    """
+    Work around a wandb SDK bug where `flags` can be None and then json.loads(None) crashes.
+    Applies a narrow patch only to wandb's server-module json loader.
+    """
+    try:
+        from wandb.sdk.lib import server as wandb_server
+    except Exception:
+        return
+
+    # Avoid patching multiple times when hydra re-enters in the same process.
+    if getattr(wandb_server, "_geometryforcing_safe_json_patched", False):
+        return
+
+    original_loads = wandb_server.json.loads
+
+    def _safe_loads(payload, *args, **kwargs):
+        if payload is None:
+            payload = "{}"
+        return original_loads(payload, *args, **kwargs)
+
+    wandb_server.json.loads = _safe_loads
+    wandb_server._geometryforcing_safe_json_patched = True
+
+
 def run_local(cfg: DictConfig):
+    _patch_wandb_flags_none_bug()
+
     # delay some imports in case they are not needed in non-local envs for submission
     from experiments import build_experiment
     from utils.wandb_utils import OfflineWandbLogger, SpaceEfficientWandbLogger

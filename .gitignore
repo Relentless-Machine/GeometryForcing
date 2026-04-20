@@ -178,6 +178,10 @@ huggingface/
 outputs_*
 outputs_*/
 
+# train outputs
+output
+output/
+
 # personal logs
 logs/
 logs

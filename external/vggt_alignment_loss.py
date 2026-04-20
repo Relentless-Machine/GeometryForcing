@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import Tensor
 from external.alignment_projector import ConvProjector
 from utils.huggingface_utils import local_hfd_repo_dir
+import torch.utils.checkpoint as cp
 
 def mean_flat(x):
     """
@@ -26,6 +27,9 @@ class VGGTAlignmentLoss(nn.Module):
                  joint_finetune_vggt: bool = False,
                  ema_momentum: float = 0.996,
                  vggt_distill_coeff: float = 1.0,
+                 enable_vggt_checkpoint: bool = False,
+                 vggt_checkpoint_use_reentrant: bool = False,
+                 vggt_checkpoint_mode: str = "shortcut",
                  latents_info: list = None, # the shape of generative model latents
                  encoder_info: list = [24, 1374, 2048], # the shape of encoder output
                  mid_channels: int = 128,
@@ -37,9 +41,18 @@ class VGGTAlignmentLoss(nn.Module):
         self.joint_finetune_vggt = joint_finetune_vggt
         self.ema_momentum = ema_momentum
         self.vggt_distill_coeff = vggt_distill_coeff
+        self.enable_vggt_checkpoint = enable_vggt_checkpoint
+        self.vggt_checkpoint_use_reentrant = vggt_checkpoint_use_reentrant
+        self.vggt_checkpoint_mode = vggt_checkpoint_mode
         self.last_generation_alignment_loss = None
         self.last_student_ema_loss = None
         self.last_total_alignment_loss = None
+
+        if self.vggt_checkpoint_mode not in {"shortcut", "block"}:
+            raise ValueError(
+                f"Unsupported vggt_checkpoint_mode={self.vggt_checkpoint_mode}. "
+                "Supported modes are {'shortcut', 'block'}."
+            )
 
         # === 1. 初始化 VGGT 学生模型与 EMA 教师模型 ===
         vggt_repo_dir = local_hfd_repo_dir("facebook/VGGT-1B")
@@ -57,6 +70,16 @@ class VGGTAlignmentLoss(nn.Module):
             for p in self.vggt_model.parameters():
                 p.requires_grad = False
             self.vggt_teacher_ema = None
+
+        # Optional block-level checkpointing inside VGGT Aggregator.
+        if hasattr(self.vggt_model, "aggregator"):
+            self.vggt_model.aggregator.use_activation_checkpoint = (
+                self.enable_vggt_checkpoint and self.joint_finetune_vggt and self.vggt_checkpoint_mode == "block"
+            )
+            self.vggt_model.aggregator.checkpoint_use_reentrant = self.vggt_checkpoint_use_reentrant
+        if self.vggt_teacher_ema is not None and hasattr(self.vggt_teacher_ema, "aggregator"):
+            self.vggt_teacher_ema.aggregator.use_activation_checkpoint = False
+            self.vggt_teacher_ema.aggregator.checkpoint_use_reentrant = self.vggt_checkpoint_use_reentrant
         # import pdb; pdb.set_trace()
         # === 2. 构建连接器 ===
         # for realestate 10k uvit setting: totally 7 blocks 
@@ -135,7 +158,23 @@ class VGGTAlignmentLoss(nn.Module):
             teacher_buffer.data.copy_(student_buffer.data)
 
     def _extract_vggt_features(self, images: Tensor, model: nn.Module):
-        aggregated_tokens_list, patch_start_idx = model.shortcut_forward(images)
+        should_use_checkpoint = (
+            self.enable_vggt_checkpoint
+            and self.joint_finetune_vggt
+            and self.vggt_checkpoint_mode == "shortcut"
+            and self.training
+            and torch.is_grad_enabled()
+            and any(p.requires_grad for p in model.parameters())
+        )
+
+        if should_use_checkpoint:
+            aggregated_tokens_list, patch_start_idx = cp.checkpoint(
+                model.shortcut_forward,
+                images,
+                use_reentrant=self.vggt_checkpoint_use_reentrant,
+            )
+        else:
+            aggregated_tokens_list, patch_start_idx = model.shortcut_forward(images)
         target_h,target_w =  self.encoder_info[1], self.encoder_info[2]
         aggregated_tokens_list = [
             F.interpolate(tokens, size=(target_h, target_w), mode='bilinear', align_corners=False)
