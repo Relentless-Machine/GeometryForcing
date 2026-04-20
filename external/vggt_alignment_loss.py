@@ -315,7 +315,8 @@ class VGGTAlignmentLoss(nn.Module):
             teacher_feat_flat = rearrange(teacher_feat, 'b c h w -> b c (h w)')
             student_feat_norm = F.normalize(student_feat_flat, p=2, dim=-1)
             teacher_feat_norm = F.normalize(teacher_feat_flat, p=2, dim=-1)
-            student_ema_loss = mean_flat(-(student_feat_norm * teacher_feat_norm)).sum(dim=-1)
+            channel_wise_sim = (student_feat_norm * teacher_feat_norm).sum(dim=-1)
+            student_ema_loss = -channel_wise_sim.mean()
             self.last_student_ema_loss = student_ema_loss.detach()
             alignment_loss = alignment_loss + self.vggt_distill_coeff * student_ema_loss
 

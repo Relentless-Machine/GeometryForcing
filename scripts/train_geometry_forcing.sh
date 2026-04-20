@@ -40,7 +40,7 @@ python -m main +name=RE10k dataset=realestate10k \
         algorithm.alignment.alignment_coeff=0.1 \
         algorithm.alignment.joint_finetune_vggt=true \
         algorithm.alignment.ema_momentum=0.995 \
-        algorithm.alignment.vggt_distill_coeff=100 \
+        algorithm.alignment.vggt_distill_coeff=1.0 \
         algorithm.alignment.alignment_context_length=16 \
         algorithm.alignment.enable_vggt_checkpoint=true \
         algorithm.alignment.vggt_checkpoint_mode=block \
