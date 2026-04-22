@@ -32,17 +32,29 @@ class BaseDataModule(pl.LightningDataModule):
     def _dataloader(self, split: str) -> TRAIN_DATALOADERS | EVAL_DATALOADERS:
         dataset = self._build_dataset(split)
         split_cfg = self.exp_cfg[split]
+        num_workers = self._get_num_workers(split_cfg.data.num_workers)
+        persistent_workers = bool(
+            split_cfg.data.get("persistent_workers", split == "training")
+        ) and num_workers > 0
+
+        dataloader_kwargs = {}
+        prefetch_factor = split_cfg.data.get("prefetch_factor", None)
+        if prefetch_factor is not None and num_workers > 0:
+            dataloader_kwargs["prefetch_factor"] = int(prefetch_factor)
+
         return torch.utils.data.DataLoader(
             dataset,
             batch_size=split_cfg.batch_size,
-            num_workers=self._get_num_workers(split_cfg.data.num_workers),
+            num_workers=num_workers,
             shuffle=self._get_shuffle(dataset, split_cfg.data.shuffle),
-            persistent_workers= (split == "training") and self._get_num_workers(split_cfg.data.num_workers),
+            pin_memory=bool(split_cfg.data.get("pin_memory", True)),
+            persistent_workers=persistent_workers,
             worker_init_fn=lambda worker_id: (
                 dataset.worker_init_fn(worker_id)
                 if hasattr(dataset, "worker_init_fn")
                 else None
             ),
+            **dataloader_kwargs,
         )
 
     def train_dataloader(self) -> TRAIN_DATALOADERS:

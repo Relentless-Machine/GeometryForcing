@@ -1,11 +1,40 @@
 # === training start ===
 date=$(date +%Y%m%d_%H%M%S)
 output_dir="output"
-exp_name="dfot-geometry-forcing-re10k-16f-${date}"
+base_exp_name="${BASE_EXP_NAME:-dfot-geometry-forcing-re10k-16f}"
+use_fixed_exp_name="${USE_FIXED_EXP_NAME:-false}"
+auto_resume_wandb_id="${AUTO_RESUME_WANDB_ID:-false}"
+if [ "${use_fixed_exp_name}" = "true" ]; then
+  exp_name="${base_exp_name}"
+else
+  exp_name="${base_exp_name}-${date}"
+fi
 result_dir="$output_dir/train/$exp_name"
-init_ckpt_path="checkpoints/DFoT_16f_state_dict.ckpt"
+init_ckpt_path="${INIT_CKPT_PATH:-checkpoints/geometry_forcing_state_dict.ckpt}"
 eval_result_dir="$output_dir/evaluations/$exp_name"
 algorithm="dfot_geometry_forcing"
+wandb_resume_arg=""
+resolved_wandb_resume_id="${WANDB_RESUME_ID:-}"
+if [ -z "${resolved_wandb_resume_id}" ] \
+  && [ "${use_fixed_exp_name}" = "true" ] \
+  && [ "${auto_resume_wandb_id}" = "true" ]; then
+  # Reuse the latest run id under this fixed experiment directory.
+  # Expected run dir names: run-YYYYMMDD_HHMMSS-<id> or offline-run-YYYYMMDD_HHMMSS-<id>
+  latest_wandb_run_dir=$(ls -dt "${result_dir}"/wandb/run-* "${result_dir}"/wandb/offline-run-* 2>/dev/null | head -n 1)
+  if [ -n "${latest_wandb_run_dir}" ] && [ -d "${latest_wandb_run_dir}" ]; then
+    resolved_wandb_resume_id="${latest_wandb_run_dir##*-}"
+    echo "AUTO_RESUME_WANDB_ID is true. Reusing wandb run id: ${resolved_wandb_resume_id}"
+  else
+    echo "AUTO_RESUME_WANDB_ID is true, but no previous wandb run dir found under ${result_dir}/wandb"
+  fi
+fi
+
+if [ -n "${resolved_wandb_resume_id}" ]; then
+  wandb_resume_arg="resume=${resolved_wandb_resume_id}"
+  echo "wandb resume enabled with id: ${resolved_wandb_resume_id}"
+else
+  echo "wandb resume disabled."
+fi
 
 mkdir -p "$result_dir" "$eval_result_dir"
 echo "output_dir: ${output_dir}"
@@ -35,6 +64,7 @@ echo "PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
 
 python -m main +name=RE10k dataset=realestate10k \
         algorithm=$algorithm \
+        $wandb_resume_arg \
         experiment=video_generation @diffusion/continuous \
         algorithm.alignment.latents_info=2 \
         algorithm.alignment.alignment_coeff=0.1 \
@@ -48,12 +78,15 @@ python -m main +name=RE10k dataset=realestate10k \
         load=$init_ckpt_path \
         dataset.subdataset_size=10000 \
         experiment.training.lr=8e-6 \
-        experiment.training.max_epochs=24 \
+        experiment.training.max_epochs=25 \
         experiment.training.batch_size=1 \
         experiment.training.optim.accumulate_grad_batches=20 \
-        algorithm.backbone.use_checkpointing=[true,true,true,true] \
+        algorithm.backbone.use_checkpointing=[false,false,true,true] \
         ++experiment.training.checkpointing.save_top_k=1 \
-        ++experiment.training.checkpointing.save_weights_only=true \
+        ++experiment.training.checkpointing.save_last=true \
+        ++experiment.training.checkpointing.monitor=validation/loss \
+        ++experiment.training.checkpointing.mode=min \
+        ++experiment.training.checkpointing.save_weights_only=false \
         experiment.validation.batch_size=2 \
         experiment.training.compile=False \
         experiment.training.data.num_workers=16 \
@@ -76,7 +109,7 @@ fi
 echo "Absolute path of the latest checkpoint: ${latest_ckpt_abs}"
 # = is not allowed to pass to eval cmd 
 lasted_ckpt_path=${checkpoints_dir}/latest.ckpt
-ln -s ${latest_ckpt_abs} ${lasted_ckpt_path}
+ln -sfn ${latest_ckpt_abs} ${lasted_ckpt_path}
 
 python -m main +name=single_image_to_long dataset=realestate10k \
         algorithm=$algorithm experiment=video_generation \

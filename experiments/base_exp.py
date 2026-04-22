@@ -17,7 +17,7 @@ import lightning.pytorch as pl
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from utils.print_utils import cyan
 from utils.distributed_utils import rank_zero_print
@@ -129,6 +129,18 @@ class BaseLightningExperiment(BaseExperiment):
         if self.logger:
             callbacks.append(LearningRateMonitor("step", True))
         if "checkpointing" in self.cfg.training:
+            checkpointing_cfg = OmegaConf.to_container(
+                self.cfg.training.checkpointing, resolve=True
+            )
+            save_top_k = checkpointing_cfg.get("save_top_k", 1)
+            if save_top_k and save_top_k > 0 and not checkpointing_cfg.get("monitor"):
+                # Lightning requires monitor when save_top_k > 0; default to validation loss.
+                checkpointing_cfg["monitor"] = "validation/loss"
+                checkpointing_cfg.setdefault("mode", "min")
+                rank_zero_print(
+                    cyan("Checkpointing:"),
+                    "monitor is not set while save_top_k > 0; defaulting to monitor='validation/loss', mode='min'.",
+                )
             callbacks.append(
                 ModelCheckpoint(
                     pathlib.Path(
@@ -137,7 +149,7 @@ class BaseLightningExperiment(BaseExperiment):
                         ]
                     )
                     / "checkpoints",
-                    **self.cfg.training.checkpointing,
+                    **checkpointing_cfg,
                 )
             )
         callbacks += self._build_common_callbacks()

@@ -17,6 +17,8 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import imageio
+from utils.print_utils import cyan
+from utils.distributed_utils import rank_zero_print
 
 class DFoTVideoPose(DFoTVideo):
     """
@@ -149,6 +151,79 @@ class DFoTGeometryForcing(DFoTVideoPose):
                 self.vggt_layer = alignment_dict["latents_info"]
             else:
                 raise ValueError(f"Unknown encoder_type: {encoder_type}")
+
+    def _should_include_in_checkpoint(self, key: str) -> bool:
+        if super()._should_include_in_checkpoint(key):
+            return True
+        return key.startswith("vggt_alignment_loss.")
+
+    def _collect_prefix_stats(self, state_dict: Dict[str, Any]) -> Dict[str, int]:
+        return {
+            "diffusion": sum(1 for k in state_dict if k.startswith("diffusion_model.")),
+            "projector": sum(1 for k in state_dict if k.startswith("vggt_alignment_loss.projectors.")),
+            "vggt_model": sum(1 for k in state_dict if k.startswith("vggt_alignment_loss.vggt_model.")),
+            "vggt_teacher_ema": sum(1 for k in state_dict if k.startswith("vggt_alignment_loss.vggt_teacher_ema.")),
+        }
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        state_dict = checkpoint.get("state_dict", {})
+        pre_stats = self._collect_prefix_stats(state_dict)
+
+        # Compatibility for released lightweight checkpoints that only store diffusion weights.
+        # Keep strict loading usable by pre-filling alignment keys with current initialization.
+        has_any_alignment = any(
+            k.startswith("vggt_alignment_loss.") for k in state_dict
+        )
+        injected_alignment = 0
+        if not has_any_alignment and hasattr(self, "vggt_alignment_loss"):
+            for key, value in self.state_dict().items():
+                if key.startswith("vggt_alignment_loss.") and key not in state_dict:
+                    state_dict[key] = value
+                    injected_alignment += 1
+            if injected_alignment > 0:
+                rank_zero_print(
+                    cyan("Diffusion-only checkpoint detected."),
+                    (
+                        f"Injected {injected_alignment} alignment tensors from current initialization "
+                        "(projector/VGGT) to keep strict loading enabled."
+                    ),
+                )
+
+        # Legacy ckpt compatibility: old checkpoints may not contain EMA teacher.
+        # In that case, hard-copy student -> teacher once at load time.
+        if pre_stats["vggt_model"] > 0 and pre_stats["vggt_teacher_ema"] == 0:
+            student_prefix = "vggt_alignment_loss.vggt_model."
+            teacher_prefix = "vggt_alignment_loss.vggt_teacher_ema."
+            copied = 0
+            for key, value in list(state_dict.items()):
+                if key.startswith(student_prefix):
+                    teacher_key = teacher_prefix + key[len(student_prefix):]
+                    if teacher_key not in state_dict:
+                        state_dict[teacher_key] = value.clone() if torch.is_tensor(value) else value
+                        copied += 1
+            if copied > 0:
+                rank_zero_print(
+                    cyan("Legacy checkpoint detected: EMA teacher missing."),
+                    f"Hard-copied {copied} tensors from VGGT student to EMA teacher.",
+                )
+
+        super().on_load_checkpoint(checkpoint)
+
+        post_stats = self._collect_prefix_stats(checkpoint.get("state_dict", {}))
+        rank_zero_print(
+            cyan("Checkpoint module restore summary:"),
+            (
+                f"diffusion={post_stats['diffusion']}, "
+                f"projector={post_stats['projector']}, "
+                f"vggt_model={post_stats['vggt_model']}, "
+                f"vggt_teacher_ema={post_stats['vggt_teacher_ema']} "
+                f"(alignment_injected={injected_alignment}) "
+                f"(raw ckpt before adaptation: diffusion={pre_stats['diffusion']}, "
+                f"projector={pre_stats['projector']}, "
+                f"vggt_model={pre_stats['vggt_model']}, "
+                f"vggt_teacher_ema={pre_stats['vggt_teacher_ema']})"
+            ),
+        )
             
     def alignment_loss(self, latents_list, context_images):
         """
